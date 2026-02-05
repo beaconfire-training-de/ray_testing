@@ -403,11 +403,13 @@ validate_referential_integrity = SnowflakeOperator(
 
 # Create dim tables first and then fact (Referential Integrity)
 [create_dim_company, create_dim_date] >> create_fact_stock
+
 # Load dimensions after their tables are created
 create_dim_company >> load_dim_company
 create_dim_date >> load_dim_date
 
 # Load fact table after dimensions are loaded (need the keys)
+create_fact_stock >> load_fact_stock
 [load_dim_company, load_dim_date] >> load_fact_stock
 
 # Validate after fact table is loaded
