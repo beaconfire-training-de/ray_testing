@@ -391,13 +391,14 @@ validate_referential_integrity = SnowflakeOperator(
 # 
 # DAG Flow:
 #
-#   create_dim_company ──┐
-#                        ├──► load_dim_company ──┐
-#   create_dim_date ─────┤                       │
-#                        ├──► load_dim_date ─────┼──► load_fact_stock ──► validate_row_counts
-#   create_fact_stock ───┘                       │                              │
-#                                                │                              ▼
-#                                                │              validate_referential_integrity
+#    create_dim_company ──┬──► create_fact_stock ──┐
+#                         │                        │
+#    create_dim_date ─────┘                        │
+#            │                                     │
+#            ▼                                     ▼
+#    load_dim_company ────┬──► load_fact_stock ──► validate
+#                         │
+#    load_dim_date ───────┘
 #
 
 # Create dim tables first and then fact (Referential Integrity)
