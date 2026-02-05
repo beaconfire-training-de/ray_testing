@@ -400,9 +400,8 @@ validate_referential_integrity = SnowflakeOperator(
 #                                                │              validate_referential_integrity
 #
 
-# Create tables first (can run in parallel)
-[create_dim_company, create_dim_date, create_fact_stock]
-
+# Create dim tables first and then fact (Referential Integrity)
+[create_dim_company, create_dim_date] >> create_fact_stock
 # Load dimensions after their tables are created
 create_dim_company >> load_dim_company
 create_dim_date >> load_dim_date
