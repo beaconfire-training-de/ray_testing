@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS AIRFLOW0105.DEV.dim_company_QA_v3 (
     
     -- SCD Type 2 fields
     effective_date DATE DEFAULT CURRENT_DATE(),
-    expiration_date DATE DEFAULT '9999-12-31',
+    expiration_date DATE DEFAULT TO_DATE('9999-12-31', 'YYYY-MM-DD'),
     is_current BOOLEAN DEFAULT TRUE,
     
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -194,7 +194,7 @@ SELECT
     source.LASTDIV,
     source.DCF,
     CURRENT_DATE(),
-    '9999-12-31',
+    TO_DATE('9999-12-31', 'YYYY-MM-DD'),
     TRUE
 FROM (
     SELECT DISTINCT
