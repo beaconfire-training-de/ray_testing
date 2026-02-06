@@ -306,23 +306,40 @@ WHEN NOT MATCHED THEN INSERT (
 SQL_MERGE_FACT_STOCK = """
 MERGE INTO AIRFLOW0105.DEV.fact_stock_daily_QA_v3 AS target
 USING (
-    SELECT
-        dc.company_key,
-        dd.date_key,
-        sh.OPEN AS open_price,
-        sh.HIGH AS high_price,
-        sh.LOW AS low_price,
-        sh.CLOSE AS close_price,
-        sh.ADJCLOSE AS adj_close,
-        sh.VOLUME AS volume,
-        (sh.CLOSE - sh.OPEN) AS price_change
-    FROM US_STOCK_DAILY.DCCM.Stock_History sh
-    INNER JOIN AIRFLOW0105.DEV.dim_company_QA_v3 dc 
-        ON sh.SYMBOL = dc.symbol
-        AND dc.is_current = TRUE  -- Only join with current dimension record!
-    INNER JOIN AIRFLOW0105.DEV.dim_date_QA_v3 dd 
-        ON sh.DATE = dd.full_date
-    WHERE sh.SYMBOL IS NOT NULL AND sh.DATE IS NOT NULL
+    SELECT 
+        company_key,
+        date_key,
+        open_price,
+        high_price,
+        low_price,
+        close_price,
+        adj_close,
+        volume,
+        price_change
+    FROM (
+        SELECT
+            dc.company_key,
+            dd.date_key,
+            sh.OPEN AS open_price,
+            sh.HIGH AS high_price,
+            sh.LOW AS low_price,
+            sh.CLOSE AS close_price,
+            sh.ADJCLOSE AS adj_close,
+            sh.VOLUME AS volume,
+            (sh.CLOSE - sh.OPEN) AS price_change,
+            ROW_NUMBER() OVER (
+                PARTITION BY dc.company_key, dd.date_key 
+                ORDER BY sh.DATE DESC
+            ) AS rn
+        FROM US_STOCK_DAILY.DCCM.Stock_History sh
+        INNER JOIN AIRFLOW0105.DEV.dim_company_QA_v3 dc 
+            ON sh.SYMBOL = dc.symbol
+            AND dc.is_current = TRUE
+        INNER JOIN AIRFLOW0105.DEV.dim_date_QA_v3 dd 
+            ON sh.DATE = dd.full_date
+        WHERE sh.SYMBOL IS NOT NULL AND sh.DATE IS NOT NULL
+    ) deduped
+    WHERE rn = 1  -- Only keep one record per company_key + date_key
 ) AS source
 ON target.company_key = source.company_key 
    AND target.date_key = source.date_key
