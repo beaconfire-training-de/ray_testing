@@ -45,7 +45,7 @@ default_args = {
     'owner': 'qa',
     'depends_on_past': False,
     'start_date': datetime(2026, 1, 1),
-    'email_on_failure': False,  # Set to True and configure email in production
+    'email_on_failure': False,
     'email': ['blessanq@gmail.com'],
     'retries': 2,
     'retry_delay': timedelta(minutes=5),
@@ -55,10 +55,10 @@ dag = DAG(
     'stock_dimensional_model_QA_v4_prod',
     default_args=default_args,
     description='Production ETL pipeline v4 - Incremental loading with watermark',
-    schedule_interval='0 2 * * *',  # Daily at 2 AM
+    schedule_interval='0 2 * * *',
     catchup=False,
     tags=['v4', 'production', 'stock', 'dimensional_model', 'scd2', 'incremental'],
-    max_active_runs=1,  # Prevent concurrent runs
+    max_active_runs=1,
 )
 
 # =============================================================================
@@ -77,15 +77,14 @@ FACT_STOCK_TABLE = f'{TARGET_SCHEMA}.fact_stock_daily_v4'
 # =============================================================================
 # SQL: Create Metadata Table (NEW in v4)
 # =============================================================================
-SQL_CREATE_METADATA_TABLE = """
--- v4: Metadata table to track ETL runs and watermarks
+SQL_CREATE_METADATA_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {METADATA_TABLE} (
     metadata_id INT AUTOINCREMENT PRIMARY KEY,
     job_name VARCHAR(100) NOT NULL,
     watermark_date DATE,
-    run_mode VARCHAR(20) NOT NULL,  -- 'full' or 'incremental'
+    run_mode VARCHAR(20) NOT NULL,
     rows_processed INT,
-    run_status VARCHAR(20) NOT NULL, -- 'running', 'success', 'failed'
+    run_status VARCHAR(20) NOT NULL,
     run_start_time TIMESTAMP_NTZ,
     run_end_time TIMESTAMP_NTZ,
     error_message VARCHAR(1000),
@@ -95,7 +94,6 @@ CREATE TABLE IF NOT EXISTS {METADATA_TABLE} (
     CONSTRAINT chk_run_status CHECK (run_status IN ('running', 'success', 'failed'))
 );
 
--- Create index for faster watermark lookups
 CREATE INDEX IF NOT EXISTS idx_metadata_job_status 
 ON {METADATA_TABLE}(job_name, run_status, run_end_time);
 """
@@ -103,9 +101,7 @@ ON {METADATA_TABLE}(job_name, run_status, run_end_time);
 # =============================================================================
 # SQL: Create Dimension and Fact Tables
 # =============================================================================
-SQL_CREATE_DIM_COMPANY = """
--- v4: Company dimension with SCD Type 2 (inherited from v3)
--- v4 addition: Added updated_at for better tracking
+SQL_CREATE_DIM_COMPANY = f"""
 CREATE TABLE IF NOT EXISTS {DIM_COMPANY_TABLE} (
     company_key INT AUTOINCREMENT PRIMARY KEY,
     symbol VARCHAR(16) NOT NULL,
@@ -121,7 +117,6 @@ CREATE TABLE IF NOT EXISTS {DIM_COMPANY_TABLE} (
     last_div NUMBER(18,8),
     dcf NUMBER(18,8),
     
-    -- SCD Type 2 fields (from v3)
     effective_date DATE DEFAULT CURRENT_DATE(),
     expiration_date DATE DEFAULT TO_DATE('9999-12-31', 'YYYY-MM-DD'),
     is_current BOOLEAN DEFAULT TRUE,
@@ -132,7 +127,6 @@ CREATE TABLE IF NOT EXISTS {DIM_COMPANY_TABLE} (
     CONSTRAINT uk_dim_company_symbol_effective_v4 UNIQUE (symbol, effective_date)
 );
 
--- v4: Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_company_symbol_current_v4 
 ON {DIM_COMPANY_TABLE}(symbol, is_current);
 
@@ -140,8 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_company_current_v4
 ON {DIM_COMPANY_TABLE}(is_current);
 """
 
-SQL_CREATE_DIM_DATE = """
--- Date dimension (stable from v1, no changes in v4)
+SQL_CREATE_DIM_DATE = f"""
 CREATE TABLE IF NOT EXISTS {DIM_DATE_TABLE} (
     date_key INT PRIMARY KEY,
     full_date DATE NOT NULL,
@@ -156,13 +149,11 @@ CREATE TABLE IF NOT EXISTS {DIM_DATE_TABLE} (
     CONSTRAINT uk_dim_date_fulldate_v4 UNIQUE (full_date)
 );
 
--- v4: Create index on full_date for faster joins
 CREATE INDEX IF NOT EXISTS idx_date_fulldate_v4 
 ON {DIM_DATE_TABLE}(full_date);
 """
 
-SQL_CREATE_FACT_STOCK = """
--- v4: Fact table with load_date for partition pruning (NEW in v4)
+SQL_CREATE_FACT_STOCK = f"""
 CREATE TABLE IF NOT EXISTS {FACT_STOCK_TABLE} (
     stock_key INT AUTOINCREMENT PRIMARY KEY,
     company_key INT NOT NULL,
@@ -175,7 +166,6 @@ CREATE TABLE IF NOT EXISTS {FACT_STOCK_TABLE} (
     volume NUMBER(38,8),
     price_change NUMBER(18,8),
     
-    -- v4: Added load_date for incremental loading tracking
     load_date DATE DEFAULT CURRENT_DATE(),
     
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -189,7 +179,6 @@ CREATE TABLE IF NOT EXISTS {FACT_STOCK_TABLE} (
         UNIQUE (company_key, date_key)
 );
 
--- v4: Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_fact_load_date_v4 
 ON {FACT_STOCK_TABLE}(load_date);
 
@@ -202,19 +191,16 @@ ON {FACT_STOCK_TABLE}(company_key, date_key);
 # =============================================================================
 
 def log_etl_start(**context):
-    """
-    v4: Log ETL job start in metadata table
-    """
+    """v4: Log ETL job start in metadata table"""
     hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
     
-    # Get run mode from XCom (will be set by get_watermark_and_mode)
     ti = context['task_instance']
     run_mode = ti.xcom_pull(task_ids='get_watermark_and_mode', key='run_mode')
     
     if not run_mode:
-        run_mode = 'full'  # Default to full if not set
+        run_mode = 'full'
     
-    insert_query = """
+    insert_query = f"""
     INSERT INTO {METADATA_TABLE} (
         job_name, run_mode, run_status, run_start_time
     ) VALUES (
@@ -227,17 +213,10 @@ def log_etl_start(**context):
 
 
 def get_watermark_and_mode(**context):
-    """
-    v4: Get last watermark and determine run mode
-    Logic:
-    - First run: Full load
-    - 1st of month: Full load (monthly refresh)
-    - Other days: Incremental load from last watermark
-    """
+    """v4: Get last watermark and determine run mode"""
     hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
     
-    # Get last successful watermark
-    query = """
+    query = f"""
     SELECT watermark_date, run_mode, run_end_time
     FROM {METADATA_TABLE}
     WHERE job_name = '{JOB_NAME}'
@@ -258,7 +237,6 @@ def get_watermark_and_mode(**context):
             print(f"Last successful run: {last_run_time}")
             print(f"Last watermark: {last_watermark}, Last mode: {last_mode}")
             
-            # Determine mode: Full refresh on 1st of month
             if current_date.day == 1:
                 mode = 'full'
                 watermark = None
@@ -269,7 +247,6 @@ def get_watermark_and_mode(**context):
                 print(f"Incremental mode: processing data after {watermark}")
                 
         else:
-            # First run - do full load
             mode = 'full'
             watermark = None
             print("First run detected - performing full load")
@@ -280,7 +257,6 @@ def get_watermark_and_mode(**context):
         mode = 'full'
         watermark = None
     
-    # Push to XCom for downstream tasks
     ti = context['task_instance']
     ti.xcom_push(key='run_mode', value=mode)
     ti.xcom_push(key='watermark_date', value=str(watermark) if watermark else None)
@@ -291,10 +267,7 @@ def get_watermark_and_mode(**context):
 
 
 def branch_on_mode(**context):
-    """
-    v4: Branch based on run mode
-    Returns task_id of next task to execute
-    """
+    """v4: Branch based on run mode"""
     ti = context['task_instance']
     mode = ti.xcom_pull(task_ids='get_watermark_and_mode', key='run_mode')
     
@@ -309,25 +282,20 @@ def branch_on_mode(**context):
 
 
 def log_etl_success(**context):
-    """
-    v4: Log successful ETL completion in metadata table
-    """
+    """v4: Log successful ETL completion in metadata table"""
     hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
     ti = context['task_instance']
     
-    # Get the latest date from dim_date as new watermark
     watermark_query = f"SELECT MAX(full_date) FROM {DIM_DATE_TABLE};"
     new_watermark = hook.get_first(watermark_query)[0]
     
-    # Get row count
-    count_query = """
+    count_query = f"""
     SELECT COUNT(*) FROM {FACT_STOCK_TABLE} 
     WHERE load_date = CURRENT_DATE();
     """
     rows_processed = hook.get_first(count_query)[0]
     
-    # Update metadata
-    update_query = """
+    update_query = f"""
     UPDATE {METADATA_TABLE}
     SET 
         watermark_date = '{new_watermark}',
@@ -352,15 +320,12 @@ def log_etl_success(**context):
 
 
 def log_etl_failure(**context):
-    """
-    v4: Log ETL failure in metadata table
-    """
+    """v4: Log ETL failure in metadata table"""
     hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
     
-    # Get exception info if available
     exception = context.get('exception', 'Unknown error')
     
-    update_query = """
+    update_query = f"""
     UPDATE {METADATA_TABLE}
     SET 
         run_status = 'failed',
@@ -384,14 +349,14 @@ def log_etl_failure(**context):
 
 
 # =============================================================================
-# SQL: Incremental Load Queries (NEW in v4)
+# SQL Generation Functions (NEW in v4)
 # =============================================================================
 
 def get_incremental_dim_date_sql(watermark_date):
     """Generate SQL for incremental dim_date load"""
     watermark_filter = f"AND DATE > '{watermark_date}'" if watermark_date else ""
     
-    return """
+    return f"""
     MERGE INTO {DIM_DATE_TABLE} AS target
     USING (
         SELECT DISTINCT
@@ -419,121 +384,12 @@ def get_incremental_dim_date_sql(watermark_date):
     );
     """
 
-SQL_INCREMENTAL_SCD2_EXPIRE = """
--- v4: SCD2 - Expire old records for companies with changes (from v3)
-UPDATE {DIM_COMPANY_TABLE} AS target
-SET 
-    expiration_date = CURRENT_DATE(),
-    is_current = FALSE,
-    updated_at = CURRENT_TIMESTAMP()
-WHERE target.is_current = TRUE
-AND EXISTS (
-    SELECT 1
-    FROM (
-        SELECT 
-            s.SYMBOL,
-            COALESCE(cp.COMPANYNAME, s.NAME) AS COMPANYNAME,
-            cp.INDUSTRY,
-            cp.SECTOR,
-            COALESCE(cp.EXCHANGE, s.EXCHANGE) AS EXCHANGE,
-            cp.CEO
-        FROM {SOURCE_SCHEMA}.Symbols s
-        LEFT JOIN {SOURCE_SCHEMA}.Company_Profile cp ON s.SYMBOL = cp.SYMBOL
-        WHERE s.SYMBOL IS NOT NULL
-    ) AS source
-    WHERE source.SYMBOL = target.symbol
-    AND (
-        -- Track changes in these fields (SCD Type 2)
-        COALESCE(target.company_name, '') != COALESCE(source.COMPANYNAME, '') OR
-        COALESCE(target.industry, '') != COALESCE(source.INDUSTRY, '') OR
-        COALESCE(target.sector, '') != COALESCE(source.SECTOR, '') OR
-        COALESCE(target.exchange, '') != COALESCE(source.EXCHANGE, '') OR
-        COALESCE(target.ceo, '') != COALESCE(source.CEO, '')
-    )
-);
-"""
 
-SQL_INCREMENTAL_SCD2_INSERT = """
--- v4: SCD2 - Insert new versions (from v3)
-INSERT INTO {DIM_COMPANY_TABLE} (
-    symbol, company_name, industry, sector, exchange, ceo,
-    website, description, mktcap, beta, last_div, dcf,
-    effective_date, expiration_date, is_current
-)
-SELECT 
-    source.SYMBOL,
-    source.COMPANYNAME,
-    source.INDUSTRY,
-    source.SECTOR,
-    source.EXCHANGE,
-    source.CEO,
-    source.WEBSITE,
-    source.DESCRIPTION,
-    source.MKTCAP,
-    source.BETA,
-    source.LASTDIV,
-    source.DCF,
-    CURRENT_DATE(),
-    TO_DATE('9999-12-31', 'YYYY-MM-DD'),
-    TRUE
-FROM (
-    SELECT DISTINCT
-        s.SYMBOL,
-        COALESCE(cp.COMPANYNAME, s.NAME) AS COMPANYNAME,
-        cp.INDUSTRY,
-        cp.SECTOR,
-        COALESCE(cp.EXCHANGE, s.EXCHANGE) AS EXCHANGE,
-        cp.CEO,
-        cp.WEBSITE,
-        cp.DESCRIPTION,
-        cp.MKTCAP,
-        cp.BETA,
-        cp.LASTDIV,
-        cp.DCF
-    FROM {SOURCE_SCHEMA}.Symbols s
-    LEFT JOIN {SOURCE_SCHEMA}.Company_Profile cp ON s.SYMBOL = cp.SYMBOL
-    WHERE s.SYMBOL IS NOT NULL
-) AS source
-WHERE NOT EXISTS (
-    SELECT 1 
-    FROM {DIM_COMPANY_TABLE} AS target
-    WHERE target.symbol = source.SYMBOL
-    AND target.is_current = TRUE
-);
-"""
-
-SQL_INCREMENTAL_SCD1_UPDATE = """
--- v4: SCD1 - Update non-tracked fields (from v3)
-UPDATE {DIM_COMPANY_TABLE} AS target
-SET 
-    website = source.WEBSITE,
-    description = source.DESCRIPTION,
-    mktcap = source.MKTCAP,
-    beta = source.BETA,
-    last_div = source.LASTDIV,
-    dcf = source.DCF,
-    updated_at = CURRENT_TIMESTAMP()
-FROM (
-    SELECT DISTINCT
-        s.SYMBOL,
-        cp.WEBSITE,
-        cp.DESCRIPTION,
-        cp.MKTCAP,
-        cp.BETA,
-        cp.LASTDIV,
-        cp.DCF
-    FROM {SOURCE_SCHEMA}.Symbols s
-    LEFT JOIN {SOURCE_SCHEMA}.Company_Profile cp ON s.SYMBOL = cp.SYMBOL
-    WHERE s.SYMBOL IS NOT NULL
-) AS source
-WHERE target.symbol = source.SYMBOL
-AND target.is_current = TRUE;
-"""
 def get_incremental_fact_load_sql(watermark_date):
     """Generate SQL for incremental fact load"""
     watermark_filter = f"AND sh.DATE > '{watermark_date}'" if watermark_date else ""
     
-    return """
+    return f"""
     MERGE INTO {FACT_STOCK_TABLE} AS target
     USING (
         SELECT 
@@ -584,6 +440,8 @@ def get_incremental_fact_load_sql(watermark_date):
         source.adj_close, source.volume, source.price_change, CURRENT_DATE()
     );
     """
+
+
 def run_incremental_dim_date(**context):
     """Execute incremental load for dim_date"""
     ti = context['task_instance']
@@ -595,6 +453,16 @@ def run_incremental_dim_date(**context):
     print(f"Executing incremental dim_date load with watermark: {watermark_date}")
     hook.run(sql)
     print("Incremental dim_date load completed")
+
+
+def run_full_dim_date(**context):
+    """Execute full load for dim_date"""
+    hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
+    sql = get_incremental_dim_date_sql(None)
+    
+    print("Executing full dim_date load")
+    hook.run(sql)
+    print("Full dim_date load completed")
 
 
 def run_incremental_fact_load(**context):
@@ -609,35 +477,133 @@ def run_incremental_fact_load(**context):
     hook.run(sql)
     print("Incremental fact load completed")
 
-# =============================================================================
-# SQL: Full Load Queries (v4 - same as incremental but without watermark filter)
-# =============================================================================
-
-def run_full_dim_date(**context):
-    """Execute full load for dim_date"""
-    hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
-    sql = get_incremental_dim_date_sql(None)  # No watermark = full load
-    
-    print("Executing full dim_date load")
-    hook.run(sql)
-    print("Full dim_date load completed")
-
 
 def run_full_fact_load(**context):
     """Execute full load for fact table"""
     hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
-    sql = get_incremental_fact_load_sql(None)  # No watermark = full load
+    sql = get_incremental_fact_load_sql(None)
     
     print("Executing full fact load")
     hook.run(sql)
     print("Full fact load completed")
 
+
+# =============================================================================
+# SQL: SCD Operations
+# =============================================================================
+
+SQL_INCREMENTAL_SCD2_EXPIRE = f"""
+UPDATE {DIM_COMPANY_TABLE} AS target
+SET 
+    expiration_date = CURRENT_DATE(),
+    is_current = FALSE,
+    updated_at = CURRENT_TIMESTAMP()
+WHERE target.is_current = TRUE
+AND EXISTS (
+    SELECT 1
+    FROM (
+        SELECT 
+            s.SYMBOL,
+            COALESCE(cp.COMPANYNAME, s.NAME) AS COMPANYNAME,
+            cp.INDUSTRY,
+            cp.SECTOR,
+            COALESCE(cp.EXCHANGE, s.EXCHANGE) AS EXCHANGE,
+            cp.CEO
+        FROM {SOURCE_SCHEMA}.Symbols s
+        LEFT JOIN {SOURCE_SCHEMA}.Company_Profile cp ON s.SYMBOL = cp.SYMBOL
+        WHERE s.SYMBOL IS NOT NULL
+    ) AS source
+    WHERE source.SYMBOL = target.symbol
+    AND (
+        COALESCE(target.company_name, '') != COALESCE(source.COMPANYNAME, '') OR
+        COALESCE(target.industry, '') != COALESCE(source.INDUSTRY, '') OR
+        COALESCE(target.sector, '') != COALESCE(source.SECTOR, '') OR
+        COALESCE(target.exchange, '') != COALESCE(source.EXCHANGE, '') OR
+        COALESCE(target.ceo, '') != COALESCE(source.CEO, '')
+    )
+);
+"""
+
+SQL_INCREMENTAL_SCD2_INSERT = f"""
+INSERT INTO {DIM_COMPANY_TABLE} (
+    symbol, company_name, industry, sector, exchange, ceo,
+    website, description, mktcap, beta, last_div, dcf,
+    effective_date, expiration_date, is_current
+)
+SELECT 
+    source.SYMBOL,
+    source.COMPANYNAME,
+    source.INDUSTRY,
+    source.SECTOR,
+    source.EXCHANGE,
+    source.CEO,
+    source.WEBSITE,
+    source.DESCRIPTION,
+    source.MKTCAP,
+    source.BETA,
+    source.LASTDIV,
+    source.DCF,
+    CURRENT_DATE(),
+    TO_DATE('9999-12-31', 'YYYY-MM-DD'),
+    TRUE
+FROM (
+    SELECT DISTINCT
+        s.SYMBOL,
+        COALESCE(cp.COMPANYNAME, s.NAME) AS COMPANYNAME,
+        cp.INDUSTRY,
+        cp.SECTOR,
+        COALESCE(cp.EXCHANGE, s.EXCHANGE) AS EXCHANGE,
+        cp.CEO,
+        cp.WEBSITE,
+        cp.DESCRIPTION,
+        cp.MKTCAP,
+        cp.BETA,
+        cp.LASTDIV,
+        cp.DCF
+    FROM {SOURCE_SCHEMA}.Symbols s
+    LEFT JOIN {SOURCE_SCHEMA}.Company_Profile cp ON s.SYMBOL = cp.SYMBOL
+    WHERE s.SYMBOL IS NOT NULL
+) AS source
+WHERE NOT EXISTS (
+    SELECT 1 
+    FROM {DIM_COMPANY_TABLE} AS target
+    WHERE target.symbol = source.SYMBOL
+    AND target.is_current = TRUE
+);
+"""
+
+SQL_INCREMENTAL_SCD1_UPDATE = f"""
+UPDATE {DIM_COMPANY_TABLE} AS target
+SET 
+    website = source.WEBSITE,
+    description = source.DESCRIPTION,
+    mktcap = source.MKTCAP,
+    beta = source.BETA,
+    last_div = source.LASTDIV,
+    dcf = source.DCF,
+    updated_at = CURRENT_TIMESTAMP()
+FROM (
+    SELECT DISTINCT
+        s.SYMBOL,
+        cp.WEBSITE,
+        cp.DESCRIPTION,
+        cp.MKTCAP,
+        cp.BETA,
+        cp.LASTDIV,
+        cp.DCF
+    FROM {SOURCE_SCHEMA}.Symbols s
+    LEFT JOIN {SOURCE_SCHEMA}.Company_Profile cp ON s.SYMBOL = cp.SYMBOL
+    WHERE s.SYMBOL IS NOT NULL
+) AS source
+WHERE target.symbol = source.SYMBOL
+AND target.is_current = TRUE;
+"""
+
 # =============================================================================
 # SQL: Data Quality Checks (NEW in v4)
 # =============================================================================
 
-SQL_DQ_ROW_COUNTS = """
--- v4: Validate row counts
+SQL_DQ_ROW_COUNTS = f"""
 SELECT 
     'dim_company_total' AS metric_name,
     COUNT(*) AS metric_value,
@@ -688,8 +654,7 @@ FROM {FACT_STOCK_TABLE}
 WHERE load_date = CURRENT_DATE();
 """
 
-SQL_DQ_NULL_CHECK = """
--- v4: Check for null values in critical fields
+SQL_DQ_NULL_CHECK = f"""
 SELECT 
     'null_company_key' AS check_name,
     COUNT(*) AS issue_count,
@@ -719,8 +684,7 @@ WHERE (open_price IS NULL OR close_price IS NULL)
 AND load_date = CURRENT_DATE();
 """
 
-SQL_DQ_REFERENTIAL_INTEGRITY = """
--- v4: Check referential integrity
+SQL_DQ_REFERENTIAL_INTEGRITY = f"""
 SELECT 
     'orphan_company_keys' AS check_name,
     COUNT(*) AS orphan_count,
@@ -742,8 +706,7 @@ WHERE d.date_key IS NULL
 AND f.load_date = CURRENT_DATE();
 """
 
-SQL_DQ_SCD2_INTEGRITY = """
--- v4: Validate SCD Type 2 integrity
+SQL_DQ_SCD2_INTEGRITY = f"""
 SELECT 
     'symbols_with_multiple_current' AS check_name,
     COUNT(*) AS issue_count,
@@ -773,8 +736,7 @@ FROM (
 );
 """
 
-SQL_DQ_BUSINESS_RULES = """
--- v4: Validate business rules
+SQL_DQ_BUSINESS_RULES = f"""
 SELECT 
     'negative_prices' AS check_name,
     COUNT(*) AS issue_count,
@@ -808,7 +770,6 @@ AND load_date = CURRENT_DATE();
 # Airflow Tasks
 # =============================================================================
 
-# Task 0: Setup - Create tables if not exist
 create_metadata_table = SnowflakeOperator(
     task_id='create_metadata_table',
     snowflake_conn_id=SNOWFLAKE_CONN_ID,
@@ -837,7 +798,6 @@ create_fact_stock = SnowflakeOperator(
     dag=dag,
 )
 
-# Task 1: Get watermark and determine mode
 get_watermark_task = PythonOperator(
     task_id='get_watermark_and_mode',
     python_callable=get_watermark_and_mode,
@@ -845,7 +805,6 @@ get_watermark_task = PythonOperator(
     dag=dag,
 )
 
-# Task 2: Log ETL start
 log_start = PythonOperator(
     task_id='log_etl_start',
     python_callable=log_etl_start,
@@ -853,7 +812,6 @@ log_start = PythonOperator(
     dag=dag,
 )
 
-# Task 3: Branch based on mode
 branch_mode = BranchPythonOperator(
     task_id='branch_mode',
     python_callable=branch_on_mode,
@@ -861,11 +819,8 @@ branch_mode = BranchPythonOperator(
     dag=dag,
 )
 
-# ========== FULL LOAD PATH ==========
-start_full_load = EmptyOperator(
-    task_id='start_full_load',
-    dag=dag,
-)
+# Full load path
+start_full_load = EmptyOperator(task_id='start_full_load', dag=dag)
 
 full_load_dim_date = PythonOperator(
     task_id='full_load_dim_date',
@@ -901,11 +856,9 @@ full_load_fact = PythonOperator(
     provide_context=True,
     dag=dag,
 )
-# ========== INCREMENTAL LOAD PATH ==========
-start_incremental_load = EmptyOperator(
-    task_id='start_incremental_load',
-    dag=dag,
-)
+
+# Incremental load path
+start_incremental_load = EmptyOperator(task_id='start_incremental_load', dag=dag)
 
 incr_load_dim_date = PythonOperator(
     task_id='incr_load_dim_date',
@@ -942,14 +895,13 @@ incr_load_fact = PythonOperator(
     dag=dag,
 )
 
-# ========== JOIN POINT ==========
 join_paths = EmptyOperator(
     task_id='join_paths',
     trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=dag,
 )
 
-# ========== DATA QUALITY CHECKS ==========
+# Data quality checks
 dq_row_counts = SnowflakeOperator(
     task_id='dq_row_counts',
     snowflake_conn_id=SNOWFLAKE_CONN_ID,
@@ -985,7 +937,6 @@ dq_business_rules = SnowflakeOperator(
     dag=dag,
 )
 
-# ========== FINALIZATION ==========
 log_success = PythonOperator(
     task_id='log_etl_success',
     python_callable=log_etl_success,
@@ -1012,27 +963,22 @@ end = EmptyOperator(
 # Task Dependencies
 # =============================================================================
 
-# Setup phase
 create_metadata_table >> [create_dim_company, create_dim_date, create_fact_stock]
 [create_dim_company, create_dim_date, create_fact_stock] >> get_watermark_task
 get_watermark_task >> log_start >> branch_mode
 
-# Full load path
 branch_mode >> start_full_load
 start_full_load >> [full_load_dim_date, full_scd2_expire]
 full_scd2_expire >> full_scd2_insert >> full_scd1_update
 [full_load_dim_date, full_scd1_update] >> full_load_fact >> join_paths
 
-# Incremental load path
 branch_mode >> start_incremental_load
 start_incremental_load >> [incr_load_dim_date, incr_scd2_expire]
 incr_scd2_expire >> incr_scd2_insert >> incr_scd1_update
 [incr_load_dim_date, incr_scd1_update] >> incr_load_fact >> join_paths
 
-# Data quality checks
 join_paths >> [dq_row_counts, dq_null_check, dq_referential_integrity, dq_scd2_integrity, dq_business_rules]
 
-# Finalization
 [dq_row_counts, dq_null_check, dq_referential_integrity, dq_scd2_integrity, dq_business_rules] >> log_success
 [dq_row_counts, dq_null_check, dq_referential_integrity, dq_scd2_integrity, dq_business_rules] >> log_failure
 [log_success, log_failure] >> end
