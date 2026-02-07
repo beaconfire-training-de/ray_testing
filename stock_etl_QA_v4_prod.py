@@ -214,7 +214,7 @@ def log_etl_start(**context):
     if not run_mode:
         run_mode = 'full'  # Default to full if not set
     
-    insert_query = f"""
+    insert_query = """
     INSERT INTO {METADATA_TABLE} (
         job_name, run_mode, run_status, run_start_time
     ) VALUES (
@@ -237,7 +237,7 @@ def get_watermark_and_mode(**context):
     hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
     
     # Get last successful watermark
-    query = f"""
+    query = """
     SELECT watermark_date, run_mode, run_end_time
     FROM {METADATA_TABLE}
     WHERE job_name = '{JOB_NAME}'
