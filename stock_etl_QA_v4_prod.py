@@ -44,7 +44,7 @@ from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
 default_args = {
     'owner': 'qa',
     'depends_on_past': False,
-    'start_date': datetime(2024, 1, 1),
+    'start_date': datetime(2026, 1, 1),
     'email_on_failure': False,  # Set to True and configure email in production
     'email': ['blessanq@gmail.com'],
     'retries': 2,
@@ -70,7 +70,6 @@ SOURCE_SCHEMA = 'US_STOCK_DAILY.DCCM'
 METADATA_TABLE = f'{TARGET_SCHEMA}.etl_metadata_v4'
 JOB_NAME = 'stock_dimensional_model_QA_v4_prod'
 
-# Table names with v4 suffix to distinguish from previous versions
 DIM_COMPANY_TABLE = f'{TARGET_SCHEMA}.dim_company_v4'
 DIM_DATE_TABLE = f'{TARGET_SCHEMA}.dim_date_v4'
 FACT_STOCK_TABLE = f'{TARGET_SCHEMA}.fact_stock_daily_v4'
@@ -388,36 +387,37 @@ def log_etl_failure(**context):
 # SQL: Incremental Load Queries (NEW in v4)
 # =============================================================================
 
-SQL_INCREMENTAL_DIM_DATE = f"""
--- v4: Load only new dates since last watermark
-MERGE INTO {DIM_DATE_TABLE} AS target
-USING (
-    SELECT DISTINCT
-        TO_NUMBER(TO_CHAR(DATE, 'YYYYMMDD')) AS date_key,
-        DATE AS full_date,
-        YEAR(DATE) AS year,
-        MONTH(DATE) AS month,
-        DAY(DATE) AS day,
-        QUARTER(DATE) AS quarter,
-        DAYNAME(DATE) AS day_of_week,
-        DAYOFWEEK(DATE) AS day_of_week_num,
-        CASE WHEN DAYOFWEEK(DATE) IN (0, 6) THEN TRUE ELSE FALSE END AS is_weekend
-    FROM {SOURCE_SCHEMA}.Stock_History
-    WHERE DATE IS NOT NULL
-    {% if ti.xcom_pull(task_ids='get_watermark_and_mode', key='watermark_date') %}
-    AND DATE > '{{{{ ti.xcom_pull(task_ids='get_watermark_and_mode', key='watermark_date') }}}}'
-    {% endif %}
-) AS source
-ON target.date_key = source.date_key
-WHEN NOT MATCHED THEN INSERT (
-    date_key, full_date, year, month, day, quarter, 
-    day_of_week, day_of_week_num, is_weekend
-) VALUES (
-    source.date_key, source.full_date, source.year, source.month, 
-    source.day, source.quarter, source.day_of_week, 
-    source.day_of_week_num, source.is_weekend
-);
-"""
+def get_incremental_dim_date_sql(watermark_date):
+    """Generate SQL for incremental dim_date load"""
+    watermark_filter = f"AND DATE > '{watermark_date}'" if watermark_date else ""
+    
+    return f"""
+    MERGE INTO {DIM_DATE_TABLE} AS target
+    USING (
+        SELECT DISTINCT
+            TO_NUMBER(TO_CHAR(DATE, 'YYYYMMDD')) AS date_key,
+            DATE AS full_date,
+            YEAR(DATE) AS year,
+            MONTH(DATE) AS month,
+            DAY(DATE) AS day,
+            QUARTER(DATE) AS quarter,
+            DAYNAME(DATE) AS day_of_week,
+            DAYOFWEEK(DATE) AS day_of_week_num,
+            CASE WHEN DAYOFWEEK(DATE) IN (0, 6) THEN TRUE ELSE FALSE END AS is_weekend
+        FROM {SOURCE_SCHEMA}.Stock_History
+        WHERE DATE IS NOT NULL
+        {watermark_filter}
+    ) AS source
+    ON target.date_key = source.date_key
+    WHEN NOT MATCHED THEN INSERT (
+        date_key, full_date, year, month, day, quarter, 
+        day_of_week, day_of_week_num, is_weekend
+    ) VALUES (
+        source.date_key, source.full_date, source.year, source.month, 
+        source.day, source.quarter, source.day_of_week, 
+        source.day_of_week_num, source.is_weekend
+    );
+    """
 
 SQL_INCREMENTAL_SCD2_EXPIRE = f"""
 -- v4: SCD2 - Expire old records for companies with changes (from v3)
@@ -529,163 +529,108 @@ FROM (
 WHERE target.symbol = source.SYMBOL
 AND target.is_current = TRUE;
 """
+def get_incremental_fact_load_sql(watermark_date):
+    """Generate SQL for incremental fact load"""
+    watermark_filter = f"AND sh.DATE > '{watermark_date}'" if watermark_date else ""
+    
+    return f"""
+    MERGE INTO {FACT_STOCK_TABLE} AS target
+    USING (
+        SELECT 
+            company_key, date_key, open_price, high_price, low_price,
+            close_price, adj_close, volume, price_change
+        FROM (
+            SELECT
+                dc.company_key,
+                dd.date_key,
+                sh.OPEN AS open_price,
+                sh.HIGH AS high_price,
+                sh.LOW AS low_price,
+                sh.CLOSE AS close_price,
+                sh.ADJCLOSE AS adj_close,
+                sh.VOLUME AS volume,
+                (sh.CLOSE - sh.OPEN) AS price_change,
+                ROW_NUMBER() OVER (
+                    PARTITION BY dc.company_key, dd.date_key 
+                    ORDER BY sh.DATE DESC
+                ) AS rn
+            FROM {SOURCE_SCHEMA}.Stock_History sh
+            INNER JOIN {DIM_COMPANY_TABLE} dc 
+                ON sh.SYMBOL = dc.symbol AND dc.is_current = TRUE
+            INNER JOIN {DIM_DATE_TABLE} dd 
+                ON sh.DATE = dd.full_date
+            WHERE sh.SYMBOL IS NOT NULL AND sh.DATE IS NOT NULL
+            {watermark_filter}
+        ) deduped
+        WHERE rn = 1
+    ) AS source
+    ON target.company_key = source.company_key 
+       AND target.date_key = source.date_key
+    WHEN MATCHED THEN UPDATE SET
+        target.open_price = source.open_price,
+        target.high_price = source.high_price,
+        target.low_price = source.low_price,
+        target.close_price = source.close_price,
+        target.adj_close = source.adj_close,
+        target.volume = source.volume,
+        target.price_change = source.price_change,
+        target.updated_at = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (
+        company_key, date_key, open_price, high_price, low_price,
+        close_price, adj_close, volume, price_change, load_date
+    ) VALUES (
+        source.company_key, source.date_key, source.open_price, 
+        source.high_price, source.low_price, source.close_price, 
+        source.adj_close, source.volume, source.price_change, CURRENT_DATE()
+    );
+    """
+def run_incremental_dim_date(**context):
+    """Execute incremental load for dim_date"""
+    ti = context['task_instance']
+    watermark_date = ti.xcom_pull(task_ids='get_watermark_and_mode', key='watermark_date')
+    
+    hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
+    sql = get_incremental_dim_date_sql(watermark_date)
+    
+    print(f"Executing incremental dim_date load with watermark: {watermark_date}")
+    hook.run(sql)
+    print("Incremental dim_date load completed")
 
-SQL_INCREMENTAL_FACT_LOAD = f"""
--- v4: Load only new fact records since watermark
-MERGE INTO {FACT_STOCK_TABLE} AS target
-USING (
-    SELECT 
-        company_key,
-        date_key,
-        open_price,
-        high_price,
-        low_price,
-        close_price,
-        adj_close,
-        volume,
-        price_change
-    FROM (
-        SELECT
-            dc.company_key,
-            dd.date_key,
-            sh.OPEN AS open_price,
-            sh.HIGH AS high_price,
-            sh.LOW AS low_price,
-            sh.CLOSE AS close_price,
-            sh.ADJCLOSE AS adj_close,
-            sh.VOLUME AS volume,
-            (sh.CLOSE - sh.OPEN) AS price_change,
-            ROW_NUMBER() OVER (
-                PARTITION BY dc.company_key, dd.date_key 
-                ORDER BY sh.DATE DESC
-            ) AS rn
-        FROM {SOURCE_SCHEMA}.Stock_History sh
-        INNER JOIN {DIM_COMPANY_TABLE} dc 
-            ON sh.SYMBOL = dc.symbol
-            AND dc.is_current = TRUE
-        INNER JOIN {DIM_DATE_TABLE} dd 
-            ON sh.DATE = dd.full_date
-        WHERE sh.SYMBOL IS NOT NULL 
-        AND sh.DATE IS NOT NULL
-        {% if ti.xcom_pull(task_ids='get_watermark_and_mode', key='watermark_date') %}
-        AND sh.DATE > '{{{{ ti.xcom_pull(task_ids='get_watermark_and_mode', key='watermark_date') }}}}'
-        {% endif %}
-    ) deduped
-    WHERE rn = 1
-) AS source
-ON target.company_key = source.company_key 
-   AND target.date_key = source.date_key
-WHEN MATCHED THEN UPDATE SET
-    target.open_price = source.open_price,
-    target.high_price = source.high_price,
-    target.low_price = source.low_price,
-    target.close_price = source.close_price,
-    target.adj_close = source.adj_close,
-    target.volume = source.volume,
-    target.price_change = source.price_change,
-    target.updated_at = CURRENT_TIMESTAMP()
-WHEN NOT MATCHED THEN INSERT (
-    company_key, date_key, open_price, high_price, low_price,
-    close_price, adj_close, volume, price_change, load_date
-) VALUES (
-    source.company_key, source.date_key, source.open_price, 
-    source.high_price, source.low_price, source.close_price, 
-    source.adj_close, source.volume, source.price_change, CURRENT_DATE()
-);
-"""
+
+def run_incremental_fact_load(**context):
+    """Execute incremental load for fact table"""
+    ti = context['task_instance']
+    watermark_date = ti.xcom_pull(task_ids='get_watermark_and_mode', key='watermark_date')
+    
+    hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
+    sql = get_incremental_fact_load_sql(watermark_date)
+    
+    print(f"Executing incremental fact load with watermark: {watermark_date}")
+    hook.run(sql)
+    print("Incremental fact load completed")
 
 # =============================================================================
 # SQL: Full Load Queries (v4 - same as incremental but without watermark filter)
 # =============================================================================
 
-SQL_FULL_DIM_DATE = f"""
--- v4: Full load for dim_date (no watermark filter)
-MERGE INTO {DIM_DATE_TABLE} AS target
-USING (
-    SELECT DISTINCT
-        TO_NUMBER(TO_CHAR(DATE, 'YYYYMMDD')) AS date_key,
-        DATE AS full_date,
-        YEAR(DATE) AS year,
-        MONTH(DATE) AS month,
-        DAY(DATE) AS day,
-        QUARTER(DATE) AS quarter,
-        DAYNAME(DATE) AS day_of_week,
-        DAYOFWEEK(DATE) AS day_of_week_num,
-        CASE WHEN DAYOFWEEK(DATE) IN (0, 6) THEN TRUE ELSE FALSE END AS is_weekend
-    FROM {SOURCE_SCHEMA}.Stock_History
-    WHERE DATE IS NOT NULL
-) AS source
-ON target.date_key = source.date_key
-WHEN NOT MATCHED THEN INSERT (
-    date_key, full_date, year, month, day, quarter, 
-    day_of_week, day_of_week_num, is_weekend
-) VALUES (
-    source.date_key, source.full_date, source.year, source.month, 
-    source.day, source.quarter, source.day_of_week, 
-    source.day_of_week_num, source.is_weekend
-);
-"""
+def run_full_dim_date(**context):
+    """Execute full load for dim_date"""
+    hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
+    sql = get_incremental_dim_date_sql(None)  # No watermark = full load
+    
+    print("Executing full dim_date load")
+    hook.run(sql)
+    print("Full dim_date load completed")
 
-SQL_FULL_FACT_LOAD = f"""
--- v4: Full load for fact table (no watermark filter)
-MERGE INTO {FACT_STOCK_TABLE} AS target
-USING (
-    SELECT 
-        company_key,
-        date_key,
-        open_price,
-        high_price,
-        low_price,
-        close_price,
-        adj_close,
-        volume,
-        price_change
-    FROM (
-        SELECT
-            dc.company_key,
-            dd.date_key,
-            sh.OPEN AS open_price,
-            sh.HIGH AS high_price,
-            sh.LOW AS low_price,
-            sh.CLOSE AS close_price,
-            sh.ADJCLOSE AS adj_close,
-            sh.VOLUME AS volume,
-            (sh.CLOSE - sh.OPEN) AS price_change,
-            ROW_NUMBER() OVER (
-                PARTITION BY dc.company_key, dd.date_key 
-                ORDER BY sh.DATE DESC
-            ) AS rn
-        FROM {SOURCE_SCHEMA}.Stock_History sh
-        INNER JOIN {DIM_COMPANY_TABLE} dc 
-            ON sh.SYMBOL = dc.symbol
-            AND dc.is_current = TRUE
-        INNER JOIN {DIM_DATE_TABLE} dd 
-            ON sh.DATE = dd.full_date
-        WHERE sh.SYMBOL IS NOT NULL 
-        AND sh.DATE IS NOT NULL
-    ) deduped
-    WHERE rn = 1
-) AS source
-ON target.company_key = source.company_key 
-   AND target.date_key = source.date_key
-WHEN MATCHED THEN UPDATE SET
-    target.open_price = source.open_price,
-    target.high_price = source.high_price,
-    target.low_price = source.low_price,
-    target.close_price = source.close_price,
-    target.adj_close = source.adj_close,
-    target.volume = source.volume,
-    target.price_change = source.price_change,
-    target.updated_at = CURRENT_TIMESTAMP()
-WHEN NOT MATCHED THEN INSERT (
-    company_key, date_key, open_price, high_price, low_price,
-    close_price, adj_close, volume, price_change, load_date
-) VALUES (
-    source.company_key, source.date_key, source.open_price, 
-    source.high_price, source.low_price, source.close_price, 
-    source.adj_close, source.volume, source.price_change, CURRENT_DATE()
-);
-"""
+
+def run_full_fact_load(**context):
+    """Execute full load for fact table"""
+    hook = SnowflakeHook(snowflake_conn_id=SNOWFLAKE_CONN_ID)
+    sql = get_incremental_fact_load_sql(None)  # No watermark = full load
+    
+    print("Executing full fact load")
+    hook.run(sql)
+    print("Full fact load completed")
 
 # =============================================================================
 # SQL: Data Quality Checks (NEW in v4)
@@ -922,10 +867,10 @@ start_full_load = EmptyOperator(
     dag=dag,
 )
 
-full_load_dim_date = SnowflakeOperator(
+full_load_dim_date = PythonOperator(
     task_id='full_load_dim_date',
-    snowflake_conn_id=SNOWFLAKE_CONN_ID,
-    sql=SQL_FULL_DIM_DATE,
+    python_callable=run_full_dim_date,
+    provide_context=True,
     dag=dag,
 )
 
@@ -950,23 +895,22 @@ full_scd1_update = SnowflakeOperator(
     dag=dag,
 )
 
-full_load_fact = SnowflakeOperator(
+full_load_fact = PythonOperator(
     task_id='full_load_fact',
-    snowflake_conn_id=SNOWFLAKE_CONN_ID,
-    sql=SQL_FULL_FACT_LOAD,
+    python_callable=run_full_fact_load,
+    provide_context=True,
     dag=dag,
 )
-
 # ========== INCREMENTAL LOAD PATH ==========
 start_incremental_load = EmptyOperator(
     task_id='start_incremental_load',
     dag=dag,
 )
 
-incr_load_dim_date = SnowflakeOperator(
+incr_load_dim_date = PythonOperator(
     task_id='incr_load_dim_date',
-    snowflake_conn_id=SNOWFLAKE_CONN_ID,
-    sql=SQL_INCREMENTAL_DIM_DATE,
+    python_callable=run_incremental_dim_date,
+    provide_context=True,
     dag=dag,
 )
 
@@ -991,10 +935,10 @@ incr_scd1_update = SnowflakeOperator(
     dag=dag,
 )
 
-incr_load_fact = SnowflakeOperator(
+incr_load_fact = PythonOperator(
     task_id='incr_load_fact',
-    snowflake_conn_id=SNOWFLAKE_CONN_ID,
-    sql=SQL_INCREMENTAL_FACT_LOAD,
+    python_callable=run_incremental_fact_load,
+    provide_context=True,
     dag=dag,
 )
 
