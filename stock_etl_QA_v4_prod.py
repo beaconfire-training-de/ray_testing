@@ -77,7 +77,7 @@ FACT_STOCK_TABLE = f'{TARGET_SCHEMA}.fact_stock_daily_v4'
 # =============================================================================
 # SQL: Create Metadata Table (NEW in v4)
 # =============================================================================
-SQL_CREATE_METADATA_TABLE = f"""
+SQL_CREATE_METADATA_TABLE = """
 -- v4: Metadata table to track ETL runs and watermarks
 CREATE TABLE IF NOT EXISTS {METADATA_TABLE} (
     metadata_id INT AUTOINCREMENT PRIMARY KEY,
@@ -103,7 +103,7 @@ ON {METADATA_TABLE}(job_name, run_status, run_end_time);
 # =============================================================================
 # SQL: Create Dimension and Fact Tables
 # =============================================================================
-SQL_CREATE_DIM_COMPANY = f"""
+SQL_CREATE_DIM_COMPANY = """
 -- v4: Company dimension with SCD Type 2 (inherited from v3)
 -- v4 addition: Added updated_at for better tracking
 CREATE TABLE IF NOT EXISTS {DIM_COMPANY_TABLE} (
@@ -140,7 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_company_current_v4
 ON {DIM_COMPANY_TABLE}(is_current);
 """
 
-SQL_CREATE_DIM_DATE = f"""
+SQL_CREATE_DIM_DATE = """
 -- Date dimension (stable from v1, no changes in v4)
 CREATE TABLE IF NOT EXISTS {DIM_DATE_TABLE} (
     date_key INT PRIMARY KEY,
@@ -161,7 +161,7 @@ CREATE INDEX IF NOT EXISTS idx_date_fulldate_v4
 ON {DIM_DATE_TABLE}(full_date);
 """
 
-SQL_CREATE_FACT_STOCK = f"""
+SQL_CREATE_FACT_STOCK = """
 -- v4: Fact table with load_date for partition pruning (NEW in v4)
 CREATE TABLE IF NOT EXISTS {FACT_STOCK_TABLE} (
     stock_key INT AUTOINCREMENT PRIMARY KEY,
@@ -320,14 +320,14 @@ def log_etl_success(**context):
     new_watermark = hook.get_first(watermark_query)[0]
     
     # Get row count
-    count_query = f"""
+    count_query = """
     SELECT COUNT(*) FROM {FACT_STOCK_TABLE} 
     WHERE load_date = CURRENT_DATE();
     """
     rows_processed = hook.get_first(count_query)[0]
     
     # Update metadata
-    update_query = f"""
+    update_query = """
     UPDATE {METADATA_TABLE}
     SET 
         watermark_date = '{new_watermark}',
@@ -360,7 +360,7 @@ def log_etl_failure(**context):
     # Get exception info if available
     exception = context.get('exception', 'Unknown error')
     
-    update_query = f"""
+    update_query = """
     UPDATE {METADATA_TABLE}
     SET 
         run_status = 'failed',
@@ -391,7 +391,7 @@ def get_incremental_dim_date_sql(watermark_date):
     """Generate SQL for incremental dim_date load"""
     watermark_filter = f"AND DATE > '{watermark_date}'" if watermark_date else ""
     
-    return f"""
+    return """
     MERGE INTO {DIM_DATE_TABLE} AS target
     USING (
         SELECT DISTINCT
@@ -419,7 +419,7 @@ def get_incremental_dim_date_sql(watermark_date):
     );
     """
 
-SQL_INCREMENTAL_SCD2_EXPIRE = f"""
+SQL_INCREMENTAL_SCD2_EXPIRE = """
 -- v4: SCD2 - Expire old records for companies with changes (from v3)
 UPDATE {DIM_COMPANY_TABLE} AS target
 SET 
@@ -453,7 +453,7 @@ AND EXISTS (
 );
 """
 
-SQL_INCREMENTAL_SCD2_INSERT = f"""
+SQL_INCREMENTAL_SCD2_INSERT = """
 -- v4: SCD2 - Insert new versions (from v3)
 INSERT INTO {DIM_COMPANY_TABLE} (
     symbol, company_name, industry, sector, exchange, ceo,
@@ -502,7 +502,7 @@ WHERE NOT EXISTS (
 );
 """
 
-SQL_INCREMENTAL_SCD1_UPDATE = f"""
+SQL_INCREMENTAL_SCD1_UPDATE = """
 -- v4: SCD1 - Update non-tracked fields (from v3)
 UPDATE {DIM_COMPANY_TABLE} AS target
 SET 
@@ -533,7 +533,7 @@ def get_incremental_fact_load_sql(watermark_date):
     """Generate SQL for incremental fact load"""
     watermark_filter = f"AND sh.DATE > '{watermark_date}'" if watermark_date else ""
     
-    return f"""
+    return """
     MERGE INTO {FACT_STOCK_TABLE} AS target
     USING (
         SELECT 
@@ -636,7 +636,7 @@ def run_full_fact_load(**context):
 # SQL: Data Quality Checks (NEW in v4)
 # =============================================================================
 
-SQL_DQ_ROW_COUNTS = f"""
+SQL_DQ_ROW_COUNTS = """
 -- v4: Validate row counts
 SELECT 
     'dim_company_total' AS metric_name,
@@ -688,7 +688,7 @@ FROM {FACT_STOCK_TABLE}
 WHERE load_date = CURRENT_DATE();
 """
 
-SQL_DQ_NULL_CHECK = f"""
+SQL_DQ_NULL_CHECK = """
 -- v4: Check for null values in critical fields
 SELECT 
     'null_company_key' AS check_name,
@@ -719,7 +719,7 @@ WHERE (open_price IS NULL OR close_price IS NULL)
 AND load_date = CURRENT_DATE();
 """
 
-SQL_DQ_REFERENTIAL_INTEGRITY = f"""
+SQL_DQ_REFERENTIAL_INTEGRITY = """
 -- v4: Check referential integrity
 SELECT 
     'orphan_company_keys' AS check_name,
@@ -742,7 +742,7 @@ WHERE d.date_key IS NULL
 AND f.load_date = CURRENT_DATE();
 """
 
-SQL_DQ_SCD2_INTEGRITY = f"""
+SQL_DQ_SCD2_INTEGRITY = """
 -- v4: Validate SCD Type 2 integrity
 SELECT 
     'symbols_with_multiple_current' AS check_name,
@@ -773,7 +773,7 @@ FROM (
 );
 """
 
-SQL_DQ_BUSINESS_RULES = f"""
+SQL_DQ_BUSINESS_RULES = """
 -- v4: Validate business rules
 SELECT 
     'negative_prices' AS check_name,
